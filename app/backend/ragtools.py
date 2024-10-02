@@ -1,3 +1,4 @@
+import re
 from typing import Any
 from azure.identity import DefaultAzureCredential
 from azure.core.credentials import AzureKeyCredential
@@ -7,7 +8,7 @@ from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 _search_tool_schema = {
     "type": "function",
     "name": "search",
-    "description": "Search the knowledge base. The knowledge base is in English, translate to and from Engligh if " + \
+    "description": "Search the knowledge base. The knowledge base is in English, translate to and from English if " + \
                    "needed. Results are formatted as a source name first in square brackets, followed by the text " + \
                    "content, and a line with '-----' at the end of each result.",
     "parameters": {
@@ -62,12 +63,26 @@ async def _search_tool(search_client: SearchClient, args: Any) -> ToolResult:
         result += f"[{r['sourcefile']}]: {r['content']}\n-----\n"
     return ToolResult(result, ToolResultDirection.TO_SERVER)
 
+KEY_PATTERN = re.compile(r'^[a-zA-Z0-9_=\-]+$')
+
 # TODO: move from sending all chunks used for grounding eagerly to only sending links to 
 # the original content in storage, it'll be more efficient overall
 async def _report_grounding_tool(search_client: SearchClient, args: Any) -> None:
-    list = ",".join(args["sources"]).replace("'", "''")
+    sources = [s for s in args["sources"] if KEY_PATTERN.match(s)]
+    list = " OR ".join(sources)
     print(f"Grounding source: {list}")
-    search_results = await search_client.search(filter=f"search.in(sourcefile, '{list}')", select="id,sourcefile,content")
+    # Use search instead of filter to align with how detailt integrated vectorization indexes
+    # are generated, where chunk_id is searchable with a keyword tokenizer, not filterable 
+    search_results = await search_client.search(search_text=list, 
+                                                search_fields=["sourcefile"], 
+                                                select=["id", "sourcefile", "content"], 
+                                                top=len(sources), 
+                                                query_type="full")
+    
+    # If your index has a key field that's filterable but not searchable and with the keyword analyzer, you can 
+    # use a filter instead (and you can remove the regex check above, just ensure you escape single quotes)
+    # search_results = await search_client.search(filter=f"search.in(chunk_id, '{list}')", select=["chunk_id", "title", "chunk"])
+
     docs = []
     async for r in search_results:
         docs.append({"chunk_id": r['id'], "title": r["sourcefile"], "chunk": r['content']})
