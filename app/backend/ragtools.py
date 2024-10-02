@@ -2,7 +2,6 @@ from typing import Any
 from azure.identity import DefaultAzureCredential
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.aio import SearchClient
-from azure.search.documents.models import VectorizableTextQuery
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
 _search_tool_schema = {
@@ -49,15 +48,18 @@ _grounding_tool_schema = {
 async def _search_tool(search_client: SearchClient, args: Any) -> ToolResult:
     print(f"Searching for '{args['query']}' in the knowledge base.")
     # Hybrid + Reranking query using Azure AI Search
+
     search_results = await search_client.search(
         search_text=args['query'], 
         query_type="semantic",
+        semantic_configuration_name="default",
+        semantic_query=args['query'],
         top=5,
-        vector_queries=[VectorizableTextQuery(text=args['query'], k_nearest_neighbors=50, fields="text_vector")],
-        select="chunk_id,title,chunk")
+        #vector_queries=[VectorizableTextQuery(text=args['query'], k_nearest_neighbors=50, fields="embedding")],
+        select="sourcefile,content")
     result = ""
     async for r in search_results:
-        result += f"[{r['chunk_id']}]: {r['chunk']}\n-----\n"
+        result += f"[{r['sourcefile']}]: {r['content']}\n-----\n"
     return ToolResult(result, ToolResultDirection.TO_SERVER)
 
 # TODO: move from sending all chunks used for grounding eagerly to only sending links to 
@@ -65,10 +67,10 @@ async def _search_tool(search_client: SearchClient, args: Any) -> ToolResult:
 async def _report_grounding_tool(search_client: SearchClient, args: Any) -> None:
     list = ",".join(args["sources"]).replace("'", "''")
     print(f"Grounding source: {list}")
-    search_results = await search_client.search(filter=f"search.in(chunk_id, '{list}')", select="chunk_id,title,chunk")
+    search_results = await search_client.search(filter=f"search.in(sourcefile, '{list}')", select="id,sourcefile,content")
     docs = []
     async for r in search_results:
-        docs.append({"chunk_id": r['chunk_id'], "title": r["title"], "chunk": r['chunk']})
+        docs.append({"chunk_id": r['id'], "title": r["sourcefile"], "chunk": r['content']})
     return ToolResult({"sources": docs}, ToolResultDirection.TO_CLIENT)
 
 def attach_rag_tools(rtmt: RTMiddleTier, search_endpoint: str, search_index: str, credentials: AzureKeyCredential | DefaultAzureCredential) -> None:
